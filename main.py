@@ -3,11 +3,14 @@ import pandas as pd
 import requests
 import glob
 import fitz
+import numpy as np
 
+TICKS = ["N1", "N2", "NM", "ON", "PN"]
 
 documents = []
 
- # class for containing PDF docs
+
+# class for containing PDF docs
 class CurrentDoc:
     def __init__(self, path):
         self.path = path
@@ -28,7 +31,7 @@ class CurrentDoc:
         self.table = None
 
 
- # get needed tickers from stocks
+# get needed tickers from stocks
 
 def get_ticker(nome_ativo):
     yfinance = "https://query2.finance.yahoo.com/v1/finance/search"
@@ -41,7 +44,8 @@ def get_ticker(nome_ativo):
     codigo_ativo = data['quotes'][0]['symbol']
     return codigo_ativo
 
-test_pdf = 'in/nota xp padrao.pdf'
+
+test_pdf = 'in/xp senha.pdf'
 
 doc = CurrentDoc(test_pdf)
 
@@ -59,42 +63,32 @@ else:
                 pages="all",
                 pandas_options={"header": ["Negociação", "C/V", "Tipo mercado"]}
             )
-            # removes headers
-            doc.table[2] = doc.table[2].iloc[1:]
 
-            # get atainable data before parsing
-            df = pd.DataFrame(columns=range(19))
-            dataPreg = doc.table[0][0][1]
-            dataLiq = doc.table[5][0][0].split(" ")[2]
-            cnpjCorretora = doc.table[1][0][0].split(" ")[1]
 
-            for i in doc.table[2]:
-                ativo = doc.table[2].iloc[i]
-                if "ON ED NM" in ativo[4]:
-                    ativo[4] = str(ativo[4]).replace("ON ED NM", "")
-                entry = [
-                    None,
-                    dataPreg,
-                    dataLiq,
-                    get_ticker(ativo[4]),  # ticker
-                    ativo[4],  # nome
-                    ativo[7],  # quantidade
-                    ativo[8],  # preco un
-                    ativo[9],  # preco total
+            # removes headers and turn to list
+            doc.table[1] = doc.table[1].drop(0).reset_index(drop=True, col_level=0)
 
-                ]
-                print(entry)
+            parsed_data = pd.DataFrame(columns=range(19))
+            parsed_data.loc[len(parsed_data)] = range(19)
+            print(parsed_data)
 
-                df.loc[len(df)] = entry
+            for index in range(len(doc.table[1])):
+                ativo = doc.table[1].iloc[index].dropna().reset_index(drop=True)
+                while True:
+                    if ativo[3][-2:] in TICKS:
+                        ativo[3] = ativo[3][:-2].rstrip()
+
+                    else:
+                        break
 
 
 
 
-        if "banco inter" in text.lower():
-            doc.doc.get
+        if "interasdsasd" in text.lower():
             doc.table = tabula.read_pdf_with_template(
                 doc.path,
                 template_path="",
                 password=doc.password,
                 pages="all"
             )
+            print(doc.table)
