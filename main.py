@@ -4,10 +4,13 @@ import requests
 import glob
 import fitz
 import numpy as np
+import time
 
-TICKS = ["N1", "N2", "NM", "ON", "PN"]
+timer = time.time()
+TICKS = ["N1", "N2", "NM", "ON", "PN", "ES", "ED", "EJ", "EB", "ER"]
 
 documents = []
+cache = {}
 
 
 # class for containing PDF docs
@@ -33,7 +36,7 @@ class CurrentDoc:
 
 # get needed tickers from stocks
 
-def get_ticker(nome_ativo):
+def get_ticker(nome_ativo, x):
     yfinance = "https://query2.finance.yahoo.com/v1/finance/search"
     user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
     params = {"q": nome_ativo, "quotes_count": 1, "country": "United States"}
@@ -41,13 +44,20 @@ def get_ticker(nome_ativo):
     res = requests.get(url=yfinance, params=params, headers={'User-Agent': user_agent})
     data = res.json()
 
-    codigo_ativo = data['quotes'][0]['symbol']
-    return codigo_ativo
+    ativo = data['quotes'][0][x]
+    return ativo
 
 
-test_pdf = 'in/xp senha.pdf'
+test_pdf = ('runtime/in/nota xp padrao.pdf')
 
 doc = CurrentDoc(test_pdf)
+db = pd.read_excel("runtime/templates/db.xlsx")
+parsed_data = pd.DataFrame(columns=range(19))
+
+maxQuant = 0
+dataPregao = ""
+dataLiq = ""
+
 
 if doc.isocr:
     pass
@@ -58,28 +68,65 @@ else:
         if "xp investimentos" in text.lower():
             doc.table = tabula.read_pdf_with_template(
                 doc.path,
-                template_path="templates/xp.json",
+                template_path="runtime/templates/xp.json",
                 password=doc.password,
                 pages="all",
                 pandas_options={"header": ["Negociação", "C/V", "Tipo mercado"]}
             )
 
-
             # removes headers and turn to list
             doc.table[1] = doc.table[1].drop(0).reset_index(drop=True, col_level=0)
 
-            parsed_data = pd.DataFrame(columns=range(19))
-            parsed_data.loc[len(parsed_data)] = range(19)
-            print(parsed_data)
+            dataPregao = str(doc.table[0][0][1])
+            dataLiq = [x.split(" ")[2] for x in doc.table[2][0] if "quido para" in str(x)][0]
+
+
+            range_of_lookout = 6
+            for i in range(3):
+                try:
+                    a = int(doc.table[1][range_of_lookout][1])
+                except ValueError:
+                    range_of_lookout += 1
+
+            if maxQuant == 0:
+                for qty in doc.table[1][range_of_lookout]:
+                    maxQuant += int(qty)
+
+
+
 
             for index in range(len(doc.table[1])):
                 ativo = doc.table[1].iloc[index].dropna().reset_index(drop=True)
+
                 while True:
-                    if ativo[3][-2:] in TICKS:
-                        ativo[3] = ativo[3][:-2].rstrip()
+                    try:
+                        a = get_ticker(ativo[3], "longname")
+
+                    except:
+                        ativo[3] = ativo[3][:-1]
 
                     else:
                         break
+
+                codNegociacao = get_ticker(ativo[3], "symbol")
+                nomePregao = ativo[3]
+                quantidade = ativo[5]
+                valorUn = ativo[6]
+                valorTotal = ativo[7]
+                irrfdt = 0
+                irrfst = 0
+                cv = ativo[1]
+                dc = ativo[range_of_lookout]
+                mercado = ativo[2]
+                corretora = "XP Investimentos"
+                cnpjCorretora = "02.332.886/0001-04"
+                empresa = get_ticker(ativo[3], "longname")
+                try:
+                    cnpjEmpresa = cache[codNegociacao.replace(".SA", "")]
+                except KeyError:
+                    cnpjEmpresa = db.loc[db['Ticker'].str.contains(f"{codNegociacao.replace('.SA', '')}")]
+                    cache[codNegociacao] = cnpjEmpresa
+
 
 
 
@@ -92,3 +139,4 @@ else:
                 pages="all"
             )
             print(doc.table)
+print(time.time() - timer)
