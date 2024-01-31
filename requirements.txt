@@ -4,3 +4,4 @@ requests~=2.31.0
 PyMuPDF
 fitz~=0.0.1.dev2
 numpy
+openpyxl
