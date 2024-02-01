@@ -10,6 +10,7 @@ import time
 start = time.time()
 
 MAX_THREADS = 6
+TRANSACTIONS_TABLE_MODEL = ["negociacao", "cv", "tipo mercado", "titulo", "obs", "quantidade", "preco", "total", "dc"]
 B3_LOCAL_DATABASE = pd.read_excel("runtime/templates/db.xlsx", engine="openpyxl").to_dict()
 
 documents = []
@@ -89,33 +90,54 @@ def render_pdf(pdf_path: str):
 
 
 def parse_data(doc: DocRender):
+
     if doc.corretora == "xp":
         tax_table = doc.data[2]
 
+        data_liquidacao = tax_table.loc[tax_table[0].str.contains("quido para", case=False, na=False), 0].str.split(" ", expand=True).iloc[:, 2].reset_index(drop=True)[0]
+
+
+        tax_table = tax_table.dropna()
+        tax_filter = tax_table[0].str.contains("|".join(["total", "quido para", "valor"]), case=False)
+        tax_table = tax_table[~tax_filter]
+        tax_table = tax_table.replace(",", ".", regex=True)
+        tax_table[1] = pd.to_numeric(tax_table[1])
+        total_tax = tax_table[1].sum()
+
         transactions = doc.data[1]
         transactions = transactions.dropna(how="all", axis=1)
-        transactions = transactions.fillna(method="ffill", axis=1)
         transactions.columns = transactions.iloc[0]
+        transactions["Obs. (*)"] = transactions["Obs. (*)"].fillna("")
+        transactions = transactions.fillna(method="ffill", axis=1)
         transactions = transactions.drop([0])
         transactions = transactions.loc[:, ~transactions.columns.duplicated(keep="last")].copy()
         transactions = transactions.rename({"Especificação do título": "titulo"}, axis="columns")
-        transactions.drop(["Prazo", "Obs. (*)"], axis=1, errors="ignore", inplace=True)
+        transactions.drop(["Prazo"], axis=1, errors="ignore", inplace=True)
 
-        transactions["titulo"] = transactions["titulo"].apply(lambda t: t[:-1] if get_stock_data(t, "longname") is None else t)
+        for titulo in transactions["titulo"].unique():
+            original = titulo
+            while True:
+                if get_stock_data(titulo, "longname") == None:
+                    titulo = titulo[:-1]
+                else:
+                    transactions["titulo"] = transactions["titulo"].replace(original, titulo)
+                    break
+
 
         transactions = pd.DataFrame(transactions)
         transactions["Quantidade"] = pd.to_numeric(transactions["Quantidade"], errors="coerce")
+        transactions.columns = TRANSACTIONS_TABLE_MODEL
 
+        total_quantity = transactions["quantidade"].sum()
 
-        data_liquidacao = doc.data[0].iloc[1].to_numpy()[0]
-        data_pregao = tax_table.loc[tax_table[0].str.contains("quido para", case=False, na=False), 0].str.split(" ", expand=True).iloc[:, 2].reset_index(drop=True)[0]
-
+        data_pregao = doc.data[0].iloc[1].to_numpy()[0]
 
         cnpj_corretora = "02.332.886/0001-04"
         nome_corretora = "XP INVESTIMENTOS CCTVM S/A"
 
+
         df = {
-            "tax_table": tax_table,
+            "per_quote_tax": round(total_tax/total_quantity, 2),
             "transactions": transactions,
             "data_liquidacao": data_liquidacao,
             "data_pregao": data_pregao,
@@ -136,15 +158,39 @@ def parse_data(doc: DocRender):
 
 def format_data(doc: dict):
     # TODO: all the necessary formating and optimization
-        transactions = doc["transactions"]
-        print(doc)
-        total_quantity = transactions["Quantidade"].sum()
+    transactions = doc["transactions"].reset_index(drop=True)
+    formated_data = pd.DataFrame(index=range(transactions.index.size), columns=[
+        "data_pregao",
+        "data_liquidacao",
+        "ticker", "nome_ativo",
+        "quantidade",
+        "un", "total",
+        "despesas_operacionais",
+        "preco_médio",
+        "irrf_day_trade",
+        "irrf_swing_trade",
+        "cv",
+        "tipo_de_operacao",
+        "mercado",
+        "nome_corretora",
+        "cnpj_corretora",
+        "nome_empresa",
+        "cnpj_empresa",
+    ])
+
+    formated_data["data_pregao"] = formated_data["data_pregao"].map(lambda a: doc["data_pregao"],)
+    formated_data["data_liquidacao"] = formated_data["data_liquidacao"].map(lambda a: doc["data_liquidacao"])
+    formated_data["nome_ativo"] = transactions["titulo"]
+    formated_data["ticker"] = formated_data["nome_ativo"]
+    for ativo in formated_data["nome_ativo"].unique():
+        formated_data["ticker"] = formated_data["ticker"].replace(ativo, get_stock_data(ativo, "symbol"))
+    print(formated_data)
+
     # TODO: Use @cache to optimize db reading
 
 
 def main():
     global documents
-    parsed_documents = []
 
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         documents = list(executor.map(render_pdf, glob.glob("runtime/in/*.pdf")))
