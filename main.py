@@ -5,8 +5,10 @@ import glob
 import fitz
 from concurrent.futures import ThreadPoolExecutor
 import time
+import warnings
+import numpy as np
 
-
+warnings.simplefilter("ignore")
 start = time.time()
 
 MAX_THREADS = 6
@@ -91,6 +93,7 @@ def render_pdf(pdf_path: str):
 
 def parse_data(doc: DocRender):
 
+
     if doc.corretora == "xp":
         tax_table = doc.data[2]
 
@@ -108,7 +111,8 @@ def parse_data(doc: DocRender):
         transactions = transactions.dropna(how="all", axis=1)
         transactions.columns = transactions.iloc[0]
         transactions["Obs. (*)"] = transactions["Obs. (*)"].fillna("")
-        transactions = transactions.fillna(method="ffill", axis=1)
+        transactions = transactions.fillna(method="bfill", axis=1)
+
         transactions = transactions.drop([0])
         transactions = transactions.loc[:, ~transactions.columns.duplicated(keep="last")].copy()
         transactions = transactions.rename({"Especificação do título": "titulo"}, axis="columns")
@@ -123,15 +127,22 @@ def parse_data(doc: DocRender):
                     transactions["titulo"] = transactions["titulo"].replace(original, titulo)
                     break
 
+        for col in transactions.columns:
+            try:
+                col*col
+                del transactions[col]
+            except:
+                pass
 
-        transactions = pd.DataFrame(transactions)
         transactions["Quantidade"] = pd.to_numeric(transactions["Quantidade"], errors="coerce")
+
         transactions.columns = TRANSACTIONS_TABLE_MODEL
 
         total_quantity = transactions["quantidade"].sum()
-
+        transactions = transactions.replace({"preco": {",": "", "\.": ""}, "total": {",": "", "\.": ""}}, regex=True)
+        transactions["preco"] = pd.to_numeric(transactions["preco"], errors="coerce")/100
+        transactions["total"] = pd.to_numeric(transactions["total"], errors="coerce") / 100
         data_pregao = doc.data[0].iloc[1].to_numpy()[0]
-
         cnpj_corretora = "02.332.886/0001-04"
         nome_corretora = "XP INVESTIMENTOS CCTVM S/A"
 
@@ -184,9 +195,19 @@ def format_data(doc: dict):
     formated_data["ticker"] = formated_data["nome_ativo"]
     for ativo in formated_data["nome_ativo"].unique():
         formated_data["ticker"] = formated_data["ticker"].replace(ativo, get_stock_data(ativo, "symbol"))
-    print(formated_data)
-
+    formated_data["quantidade"] = transactions["quantidade"]
+    formated_data["un"] = transactions["preco"]
+    formated_data["total"] = transactions["total"]
+    formated_data["despesas_operacionais"] = formated_data["quantidade"] * doc["per_quote_tax"]
+    formated_data["preco_medio"] = (formated_data["total"] + formated_data["despesas_operacionais"])/transactions["quantidade"]
+    # TODO: IRRF
+    formated_data["cv"] = transactions["cv"]
+    # TODO: Tipo
+    formated_data["mercado"] = transactions["tipo mercado"]
+    formated_data["nome_corretora"] = formated_data["nome_corretora"].map(lambda a: doc["nome_corretora"])
+    formated_data["cnpj_corretora"] = formated_data["cnpj_corretora"].map(lambda a: doc["cnpj_corretora"])
     # TODO: Use @cache to optimize db reading
+    # TODO: Round numbers on df
 
 
 def main():
@@ -198,8 +219,8 @@ def main():
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         parsed_documents = list(executor.map(parse_data, documents))
 
-    for document in parsed_documents:
-        format_data(document)
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        formated_documents = list(executor.map(format_data, parsed_documents))
 
 
 if __name__ == "__main__":
