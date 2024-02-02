@@ -7,16 +7,20 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 import warnings
 import numpy as np
+import functools
+import swifter
+
 
 warnings.simplefilter("ignore")
 start = time.time()
 
 MAX_THREADS = 6
-TRANSACTIONS_TABLE_MODEL = ["negociacao", "cv", "tipo mercado", "titulo", "obs", "quantidade", "preco", "total", "dc"]
-B3_LOCAL_DATABASE = pd.read_excel("runtime/templates/db.xlsx", engine="openpyxl").to_dict()
 
-documents = []
-cache = {}
+TRANSACTIONS_TABLE_MODEL = ["negociacao", "cv", "tipo_mercado", "titulo", "obs", "quantidade", "preco", "total", "dc"]
+B3_LOCAL_DATABASE = pd.read_excel("runtime/templates/db.xlsx", engine="openpyxl")
+
+BUFFER_SHEET_NAME = "x"
+BUFFER_SHEET_PATH = "runtime/buffer_out.xlsx"
 
 
 # class for containing PDF docs
@@ -42,8 +46,6 @@ class DocRender:
         self.corretora = None
 
 
-# get needed tickers from stocks
-
 def get_stock_data(nome_ativo, x):
     yfinance = "https://query2.finance.yahoo.com/v1/finance/search"
     user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
@@ -58,6 +60,25 @@ def get_stock_data(nome_ativo, x):
         return None
 
 
+def write_to_buffer(documents):
+    final = pd.DataFrame()
+
+    for document in documents:
+        final = final.append(document, ignore_index=True)
+
+    with pd.ExcelWriter(BUFFER_SHEET_PATH) as writer:
+        final.to_excel(writer, sheet_name=BUFFER_SHEET_NAME, index=False, header=False)
+
+
+@functools.lru_cache(maxsize=100, typed=False)
+def read_db(ticker, dado) -> tuple:
+    match_row = B3_LOCAL_DATABASE[B3_LOCAL_DATABASE['ticker'].swifter.apply(lambda x: str(x) in str(ticker))]
+
+    if not match_row.empty:
+        row = match_row.iloc[0]
+        return row[dado]
+
+    return "NÃO CADASTRADO NA B3"
 
 
 def render_pdf(pdf_path: str):
@@ -177,7 +198,7 @@ def format_data(doc: dict):
         "quantidade",
         "un", "total",
         "despesas_operacionais",
-        "preco_médio",
+        "preco_medio",
         "irrf_day_trade",
         "irrf_swing_trade",
         "cv",
@@ -195,23 +216,42 @@ def format_data(doc: dict):
     formated_data["ticker"] = formated_data["nome_ativo"]
     for ativo in formated_data["nome_ativo"].unique():
         formated_data["ticker"] = formated_data["ticker"].replace(ativo, get_stock_data(ativo, "symbol"))
+
     formated_data["quantidade"] = transactions["quantidade"]
     formated_data["un"] = transactions["preco"]
     formated_data["total"] = transactions["total"]
     formated_data["despesas_operacionais"] = formated_data["quantidade"] * doc["per_quote_tax"]
     formated_data["preco_medio"] = (formated_data["total"] + formated_data["despesas_operacionais"])/transactions["quantidade"]
-    # TODO: IRRF
-    formated_data["cv"] = transactions["cv"]
-    # TODO: Tipo
-    formated_data["mercado"] = transactions["tipo mercado"]
+    formated_data["tipo_de_operacao"] = transactions["obs"].map(lambda a: "DAY_TRADE" if "D" in a else "SWING_TRADE")
+
+    mask_day_trade = formated_data["tipo_de_operacao"] == "DAY_TRADE"
+    mask_swing_trade = ~mask_day_trade
+
+    formated_data["irrf_swing_trade"] = np.where(mask_swing_trade, 0, np.where(
+        mask_swing_trade & ((formated_data["total"] - formated_data["despesas_operacionais"]) * 0.0005 >= 1),
+        round((formated_data["total"] - formated_data["despesas_operacionais"]) * 0.0005, 2), 0))
+    formated_data["irrf_day_trade"] = np.where(mask_day_trade, np.where(
+        (formated_data["total"] - formated_data["despesas_operacionais"]) * 0.01 >= 1,
+        round((formated_data["total"] - formated_data["despesas_operacionais"]) * 0.01, 2), 0), 0)
+
+    del mask_swing_trade
+    del mask_day_trade
+
+    formated_data.round(2)
+    formated_data["mercado"] = transactions["tipo_mercado"]
     formated_data["nome_corretora"] = formated_data["nome_corretora"].map(lambda a: doc["nome_corretora"])
     formated_data["cnpj_corretora"] = formated_data["cnpj_corretora"].map(lambda a: doc["cnpj_corretora"])
-    # TODO: Use @cache to optimize db reading
-    # TODO: Round numbers on df
+    formated_data["cv"] = transactions["cv"]
+    del transactions
+    del ativo
+    formated_data["nome_empresa"] = formated_data["nome_ativo"].map(lambda a: get_stock_data(a, "shortname"))
+
+    formated_data["cnpj_empresa"] = formated_data["nome_empresa"].map(lambda a: read_db(a, "cnpj"))
+
+    return formated_data
 
 
 def main():
-    global documents
 
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         documents = list(executor.map(render_pdf, glob.glob("runtime/in/*.pdf")))
@@ -221,6 +261,8 @@ def main():
 
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         formated_documents = list(executor.map(format_data, parsed_documents))
+
+    write_to_buffer(formated_documents)
 
 
 if __name__ == "__main__":
