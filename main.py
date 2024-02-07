@@ -12,6 +12,8 @@ import os
 import swifter
 import random as rnd
 from forex_python.converter import CurrencyRates
+import sys
+import traceback
 
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -31,9 +33,11 @@ B3_LOCAL_DATABASE = pd.read_excel("runtime/templates/db.xlsx", engine="openpyxl"
 BUFFER_SHEET_NAME = "x"
 BUFFER_SHEET_PATH = "runtime/buffer_out.xlsx"
 
+passwords = []
 
 # class for containing PDF docs
 class DocRender:
+    global passwords
     def __init__(self, path):
         self.path = path
         if type(path) == str:
@@ -45,15 +49,29 @@ class DocRender:
         self.password = ""
 
         if self.doc.needs_pass:
-            passcode = input(f"A nota {path} é protegida por senha\nSenha: ")
-            self.doc.authenticate(password=passcode)
-            self.password = passcode
+            for i, passcode in enumerate(passwords):
+                try:
+                    self.doc.authenticate(password=passcode)
+                    self.password = passcode
+                    del passwords[i]
+                except ValueError:
+                    pass
+            else:
+                if not self.password:
+                    raise ValueError("Uma ou mais senhas estão incorretas ou faltantes")
+
         else:
             self.password = None
 
         self.data = None
         self.corretora = None
 
+def except_and_exit(exc_type, exc_value, tb):
+
+    traceback.print_exception(exc_type, exc_value, tb)
+    print("Pressione qualquer tecla para sair...")
+    input()
+    sys.exit(-1)
 
 def ocr_check():
     opt = webdriver.ChromeOptions()
@@ -86,10 +104,13 @@ def ocr_check():
     paths = list(glob.iglob("runtime\\in\\*.pdf"))
     for path in paths:
         doc = fitz.Document(path)
-        if not doc[0].get_text():
-            del doc
-            selenium_ocr(path)
-            os.remove(path)
+        try:
+            if not doc[0].get_text():
+                del doc
+                selenium_ocr(path)
+                os.remove(path)
+        except ValueError:
+            pass
 
 
 def get_stock_data(nome_ativo, x):
@@ -110,7 +131,7 @@ def write_to_buffer(documents):
     final = pd.DataFrame()
 
     for document in documents:
-        final = final.append(document, ignore_index=True)
+        final = pd.concat([final, document], ignore_index=True)
 
     with pd.ExcelWriter(BUFFER_SHEET_PATH, engine="openpyxl") as writer:
         final.to_excel(writer, sheet_name=BUFFER_SHEET_NAME, index=False, header=False)
@@ -126,19 +147,22 @@ def read_db(ticker) -> tuple:
 
 
 def render_pdf(pdf_path: str):
-    while True:
-        try:
-            current_document = DocRender(pdf_path)
-            break
-        except ValueError:
-            print("Senha incorreta\n")
-            pass
+    print("rendering...")
+
+    current_document = DocRender(pdf_path)
 
     text = current_document.doc[0].get_text()
 
     if "inter dtvm" in text.lower():
-        # TODO: Implement image recognition for inter if possible
-        return None
+        current_document.corretora = "inter"
+        current_document.data = tabula.read_pdf_with_template(
+            current_document.path,
+            template_path="runtime/templates/inter.json",
+            password=current_document.password,
+            pages="all",
+            pandas_options={"header": ["C/V"]}
+        )
+        return current_document
 
     if "avenue" in text.lower():
         child_pages = []
@@ -190,7 +214,6 @@ def render_pdf(pdf_path: str):
 
 
             elif index == len(child_pages) - 1:
-                # TODO: avenue templates 1 to 8
                 for i in range(6):
 
                     current_table = tabula.read_pdf_with_template(
@@ -221,7 +244,7 @@ def render_pdf(pdf_path: str):
             page.data = page.data.dropna(axis=1, how="all")
             page.data.columns = page.data.iloc[0]
             page.data = page.data.drop(index=0)
-            data = data.append(page.data)
+            data = pd.concat([data, page.data], ignore_index=True)
 
         current_document.data = data.reset_index(drop=True)
         del data
@@ -242,11 +265,12 @@ def render_pdf(pdf_path: str):
                 pandas_options={"header": ["C/V"]}
         )
         return current_document
+
     return None
 
 
 def parse_data(doc: DocRender):
-
+    print("parsing...")
 
     if doc.corretora == "xp":
         tax_table = doc.data[2]
@@ -356,11 +380,65 @@ def parse_data(doc: DocRender):
         }
 
     if doc.corretora == "inter":
-        # TODO: Implement inter parsing
-        return None
+        tax_table = doc.data[2]
+
+        data_liquidacao = tax_table.loc[tax_table[0].str.contains("quido para", case=False, na=False), 0].str.split(" ", expand=True).iloc[:, 2].reset_index(drop=True)[0]
+        data_pregao = doc.data[0]
+        data_pregao = data_pregao[1][0].split(" ")[1]
+
+        tax_table = tax_table.drop([0, 3, 7, 12],axis=0)
+        tax_table = tax_table.drop(2, axis=1)
+        total_tax = pd.to_numeric(tax_table[1].astype(str).str.replace(",", ".", regex=True)).sum()
+
+        transactions = doc.data[1]
+        transactions.columns = [
+            "bolsa",
+            "cv",
+            "tipo_mercado",
+            "titulo",
+            "obs",
+            "quantidade",
+            "un",
+            "total",
+            "tipo_de_operacao",
+        ]
+        transactions = transactions.drop(0)
+        transactions = transactions.drop("bolsa", axis=1)
+        transactions = transactions.drop(transactions[transactions["titulo"] == "SubTotal :"].index)
+        transactions = transactions.fillna("")
+
+        total_quantity = pd.to_numeric(transactions["quantidade"]).sum()
+        per_quote_tax = round(total_tax/total_quantity, 2)
+
+        for titulo in transactions["titulo"].unique():
+            original = titulo
+            while True:
+                if get_stock_data(titulo, "longname") == None:
+                    titulo = titulo[:-1]
+                else:
+                    transactions["titulo"] = transactions["titulo"].replace(original, titulo)
+                    break
+
+        for col in ["un", "total"]:
+            transactions[col] = pd.to_numeric(transactions[col].str.replace('[,.]', '', regex=True)) / 100
+            transactions[col] = transactions[col].round(2)
+
+        transactions["quantidade"] = pd.to_numeric(transactions["quantidade"].astype(str).str.replace('\.', '', regex=True))
+
+        return {
+            "data_pregao": data_pregao,
+            "data_liquidacao": data_liquidacao,
+            "per_quote_tax": per_quote_tax,
+            "transactions": transactions,
+            "cnpj_corretora": "8.945.670/0001-46",
+            "nome_corretora": "Inter DTVM Ltda.",
+            "corr": "inter",
+        }
 
 
 def format_data(doc: dict):
+    print("formating...")
+
     transactions = doc["transactions"].reset_index(drop=True)
     formated_data = pd.DataFrame(index=range(transactions.index.size), columns=[
         "data_pregao",
@@ -466,6 +544,46 @@ def format_data(doc: dict):
 
         return formated_data
 
+    if doc["corr"] == "inter":
+
+        formated_data = formated_data.assign(
+            data_pregao=doc["data_pregao"],
+            data_liquidacao=doc["data_liquidacao"],
+            cnpj_corretora=doc["cnpj_corretora"],
+            nome_corretora=doc["nome_corretora"]
+        )
+
+        formated_data["ticker"] = transactions["titulo"]
+        formated_data["nome_ativo"] = transactions["titulo"].map(lambda a: get_stock_data(a, "shortname"))
+        formated_data["quantidade"] = pd.to_numeric(transactions["quantidade"])
+        formated_data["un"] = transactions["un"]
+        formated_data["total"] = transactions["total"]
+        formated_data["despesas_operacionais"] = pd.to_numeric(round(formated_data["quantidade"] * doc["per_quote_tax"], 3))
+        formated_data["preco_medio"] = (formated_data["total"].astype(float) + formated_data["despesas_operacionais"].astype(float))
+        formated_data["preco_medio"] = formated_data["preco_medio"]/formated_data["quantidade"]
+        formated_data["tipo_de_operacao"] = transactions["obs"].map(lambda a: "DAY_TRADE" if "D" in a else "SWING_TRADE")
+
+        mask_day_trade = formated_data["tipo_de_operacao"] == "DAY_TRADE"
+        mask_swing_trade = ~mask_day_trade
+
+        formated_data["irrf_swing_trade"] = np.where(mask_swing_trade, 0, np.where(
+            mask_swing_trade & ((formated_data["total"] - formated_data["despesas_operacionais"]) * 0.0005 >= 1),
+            round((formated_data["total"] - formated_data["despesas_operacionais"]) * 0.0005, 2), 0))
+        formated_data["irrf_day_trade"] = np.where(mask_day_trade, np.where(
+            (formated_data["total"] - formated_data["despesas_operacionais"]) * 0.01 >= 1,
+            round((formated_data["total"] - formated_data["despesas_operacionais"]) * 0.01, 2), 0), 0)
+
+        del mask_swing_trade
+        del mask_day_trade
+
+        formated_data["cv"] = transactions["cv"]
+        formated_data["mercado"] = transactions["tipo_mercado"]
+        formated_data["nome_empresa"] = formated_data["nome_ativo"].map(lambda a: get_stock_data(a, "longname"))
+        formated_data["cnpj_empresa"] = formated_data["ticker"].map(lambda a: read_db(a))
+
+
+        return formated_data
+
 
 
 def main():
@@ -488,6 +606,17 @@ def main():
 
 
 if __name__ == "__main__":
+    sys.excepthook = except_and_exit
+    passwords = input(
+        "Seus documentos possuem senha?\n"
+        "Se sim, digite-as abaixo em qualquer ordem separadas por ';' (xxxx;yyyy;zzzz)\n"
+        "Senhas:  "
+    ).split(";")
+
+    print("Os erros referenciando 'jpype' a seguir são apenas avisos.\nIgnore-os, seus arquivos estão sendo lidos normalmente!")
+
     ocr_check()
     main()
-    print(time.time() - start)
+
+    print("Arquivos\nTempo de execução:", time.time() - start)
+    input("Pressione qualquer tecla para sair...")
