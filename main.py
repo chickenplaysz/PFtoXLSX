@@ -138,12 +138,12 @@ def write_to_buffer(documents):
 
 
 @functools.lru_cache(maxsize=100, typed=False)
-def read_db(ticker) -> tuple:
+def read_db(ticker) -> str:
     for row in B3_LOCAL_DATABASE.itertuples():
         if row.ticker in ticker:
             return row.cnpj
 
-    return "NÃO CADASTRADO NA B3",
+    return "NÃO CADASTRADO NA B3"
 
 
 def render_pdf(pdf_path: str):
@@ -160,7 +160,8 @@ def render_pdf(pdf_path: str):
             template_path="runtime/templates/inter.json",
             password=current_document.password,
             pages="all",
-            pandas_options={"header": ["C/V"]}
+            pandas_options={"header": ["C/V"]},
+            silent=True
         )
         return current_document
 
@@ -192,7 +193,8 @@ def render_pdf(pdf_path: str):
                         template_path=f"runtime/templates/avenue_single_{i+1}.json",
                         password=page.password,
                         pages="all",
-                        pandas_options={"header": ["COMM", "Tran Fee", "Fees", "Number", "Net Amount", "Trade#"]}
+                        pandas_options={"header": ["COMM", "Tran Fee", "Fees", "Number", "Net Amount", "Trade#"]},
+                        silent=True
                     )[0]
 
 
@@ -208,7 +210,8 @@ def render_pdf(pdf_path: str):
                     template_path="runtime/templates/avenue_first.json",
                     password=page.password,
                     pages="all",
-                    pandas_options={"header": ["Type"]}
+                    pandas_options={"header": ["Type"]},
+                    silent=True
                 )[0]
                 os.remove(page.path)
 
@@ -221,7 +224,8 @@ def render_pdf(pdf_path: str):
                         template_path=f"runtime/templates/avenue_last_{i+1}.json",
                         password=page.password,
                         pages="all",
-                        pandas_options={"header": ["COMM", "Tran Fee", "Fees", "Number", "Net Amount", "Trade#"]}
+                        pandas_options={"header": ["COMM", "Tran Fee", "Fees", "Number", "Net Amount", "Trade#"]},
+                        silent=True
                     )[0]
                     if current_table.swifter.progress_bar(False).apply(lambda a: True if a.isin(["SUMMARY FOR CURRENT TRADE DATE:"]).any() else False).any():
                         break
@@ -235,7 +239,8 @@ def render_pdf(pdf_path: str):
                     template_path="runtime/templates/avenue_normal.json",
                     password=page.password,
                     pages="all",
-                    pandas_options={"header": ["Type"]}
+                    pandas_options={"header": ["Type"]},
+                    silent=True
                 )[0]
                 os.remove(page.path)
 
@@ -262,7 +267,8 @@ def render_pdf(pdf_path: str):
                 template_path="runtime/templates/xp.json",
                 password=current_document.password,
                 pages="all",
-                pandas_options={"header": ["C/V"]}
+                pandas_options={"header": ["C/V"]},
+                silent=True
         )
         return current_document
 
@@ -384,7 +390,10 @@ def parse_data(doc: DocRender):
 
         data_liquidacao = tax_table.loc[tax_table[0].str.contains("quido para", case=False, na=False), 0].str.split(" ", expand=True).iloc[:, 2].reset_index(drop=True)[0]
         data_pregao = doc.data[0]
-        data_pregao = data_pregao[1][0].split(" ")[1]
+        try:
+            data_pregao = data_pregao[1][0].split(" ")[1]
+        except IndexError:
+            data_pregao = data_pregao[2][0]
 
         tax_table = tax_table.drop([0, 3, 7, 12],axis=0)
         tax_table = tax_table.drop(2, axis=1)
