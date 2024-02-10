@@ -116,7 +116,7 @@ def ocr_check():
 def get_stock_data(nome_ativo, x):
     yfinance = "https://query2.finance.yahoo.com/v1/finance/search"
     user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
-    params = {"q": nome_ativo, "quotes_count": 1, "country": "United States"}
+    params = {"q": nome_ativo, "quotes_count": 1, "country": "Brazil"}
 
     res = requests.get(url=yfinance, params=params, headers={'User-Agent': user_agent})
     data = res.json()
