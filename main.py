@@ -23,7 +23,7 @@ import pyautogui
 
 
 warnings.simplefilter("ignore")
-start = time.time()
+start = time.perf_counter()
 
 MAX_THREADS = 6
 
@@ -34,6 +34,7 @@ BUFFER_SHEET_NAME = "x"
 BUFFER_SHEET_PATH = "runtime/buffer_out.xlsx"
 
 passwords = []
+
 
 # class for containing PDF docs
 class DocRender:
@@ -66,12 +67,23 @@ class DocRender:
         self.data = None
         self.corretora = None
 
+
+def after_format_SA_cleanup(func):
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        formated_data = func(*args, **kwargs)
+        formated_data["ticker"] = formated_data["ticker"].str.replace("\\..*", "", regex=True)
+        return formated_data
+    return wrapper
+
 def except_and_exit(exc_type, exc_value, tb):
 
     traceback.print_exception(exc_type, exc_value, tb)
     print("Pressione qualquer tecla para sair...")
     input()
     sys.exit(-1)
+
 
 def ocr_check():
     opt = webdriver.ChromeOptions()
@@ -122,9 +134,27 @@ def get_stock_data(nome_ativo, x):
     data = res.json()
     try:
         ativo = data['quotes'][0][x]
-        return ativo
     except IndexError:
-        return None
+        ativo = None
+
+    return ativo
+
+
+@functools.lru_cache(maxsize=100, typed=False)
+def get_spaced_name(original_name):
+    stock_data = None
+
+    for i in range(len(original_name), 0, -1):
+        truncated_name = original_name[:i]
+        stock_data = get_stock_data(truncated_name, "longname")
+
+        if stock_data is not None:
+
+            suffix = original_name[len(truncated_name):len(truncated_name) + 2]
+            result_name = truncated_name + " " + suffix
+            if not get_stock_data(result_name, "longname"):
+                return truncated_name
+            return result_name
 
 
 def write_to_buffer(documents):
@@ -134,7 +164,7 @@ def write_to_buffer(documents):
         final = pd.concat([final, document], ignore_index=True)
 
     with pd.ExcelWriter(BUFFER_SHEET_PATH, engine="openpyxl") as writer:
-        final.to_excel(writer, sheet_name=BUFFER_SHEET_NAME, index=False, header=False)
+        final.to_excel(writer, sheet_name=BUFFER_SHEET_NAME, index=False, header=True)
 
 
 @functools.lru_cache(maxsize=100, typed=False)
@@ -296,20 +326,15 @@ def parse_data(doc: DocRender):
         transactions.columns = transactions.iloc[0]
         transactions["Obs. (*)"] = transactions["Obs. (*)"].fillna("")
         transactions = transactions.fillna(method="bfill", axis=1)
+        transactions.columns = transactions.iloc[0]
 
         transactions = transactions.drop([0])
         transactions = transactions.loc[:, ~transactions.columns.duplicated(keep="last")].copy()
         transactions = transactions.rename({"Especificação do título": "titulo"}, axis="columns")
-        transactions.drop(["Prazo"], axis=1, errors="ignore", inplace=True)
+        transactions = transactions.drop(["Prazo"], axis=1, errors="ignore")
 
         for titulo in transactions["titulo"].unique():
-            original = titulo
-            while True:
-                if get_stock_data(titulo, "longname") == None:
-                    titulo = titulo[:-1]
-                else:
-                    transactions["titulo"] = transactions["titulo"].replace(original, titulo)
-                    break
+            transactions["titulo"] = transactions["titulo"].replace(titulo, get_spaced_name(titulo))
 
         for col in transactions.columns:
             try:
@@ -323,7 +348,7 @@ def parse_data(doc: DocRender):
         transactions.columns = TRANSACTIONS_TABLE_MODEL
 
         total_quantity = transactions["quantidade"].sum()
-        transactions = transactions.replace({"preco": {",": "", "\.": ""}, "total": {",": "", "\.": ""}}, regex=True)
+        transactions = transactions.replace({"preco": {",": "", "\\.": ""}, "total": {",": "", "\\.": ""}}, regex=True)
         transactions["preco"] = pd.to_numeric(transactions["preco"], errors="coerce")/100
         transactions["total"] = pd.to_numeric(transactions["total"], errors="coerce") / 100
         data_pregao = doc.data[0].iloc[1].to_numpy()[0]
@@ -420,19 +445,13 @@ def parse_data(doc: DocRender):
         per_quote_tax = round(total_tax/total_quantity, 2)
 
         for titulo in transactions["titulo"].unique():
-            original = titulo
-            while True:
-                if get_stock_data(titulo, "longname") == None:
-                    titulo = titulo[:-1]
-                else:
-                    transactions["titulo"] = transactions["titulo"].replace(original, titulo)
-                    break
+            transactions["titulo"] = transactions["titulo"].replace(titulo, get_spaced_name(titulo))
 
         for col in ["un", "total"]:
-            transactions[col] = pd.to_numeric(transactions[col].str.replace('[,.]', '', regex=True)) / 100
+            transactions[col] = pd.to_numeric(transactions[col].str.replace('[,\\.]', '', regex=True)) / 100
             transactions[col] = transactions[col].round(2)
 
-        transactions["quantidade"] = pd.to_numeric(transactions["quantidade"].astype(str).str.replace('\.', '', regex=True))
+        transactions["quantidade"] = pd.to_numeric(transactions["quantidade"].astype(str).str.replace('\\.', '', regex=True))
 
         return {
             "data_pregao": data_pregao,
@@ -445,6 +464,7 @@ def parse_data(doc: DocRender):
         }
 
 
+@after_format_SA_cleanup
 def format_data(doc: dict):
     print("formating...")
 
@@ -518,9 +538,9 @@ def format_data(doc: dict):
         formated_data["nome_ativo"] = transactions["nome"]
         formated_data["quantidade"] = transactions["quantidade"]
         formated_data["un"] = pd.to_numeric(transactions["un"]).round(3)
-        formated_data["un"] = formated_data["un"].map(lambda a: cr.convert("USD", "BRL", float(a))).replace(",", "\.", regex=True)
+        formated_data["un"] = formated_data["un"].map(lambda a: cr.convert("USD", "BRL", float(a))).replace(",", ".", regex=True)
         formated_data["total"] = transactions["total"]
-        formated_data["total"] = formated_data["total"].map(lambda a: cr.convert("USD", "BRL", float(a))).replace(",", "\.", regex=True)
+        formated_data["total"] = formated_data["total"].map(lambda a: cr.convert("USD", "BRL", float(a))).replace(",", ".", regex=True)
         transactions["despesas_operacionais"] = transactions["corretagem"] + transactions["taxa_transacao"] + transactions["taxa_outras"]
 
         columns_to_convert = ["un", "total", "despesas_operacionais", "preco_medio"]
@@ -532,7 +552,7 @@ def format_data(doc: dict):
         formated_data[columns_to_convert] = formated_data[columns_to_convert].round(3).astype(str)
 
         # Remove periods and commas
-        formated_data[columns_to_convert] = formated_data[columns_to_convert].replace(["\.", ","], "", regex=True)
+        formated_data[columns_to_convert] = formated_data[columns_to_convert].replace(["\\.", ","], "", regex=True)
 
         # Convert back to float and divide by 100
         formated_data[columns_to_convert] = formated_data[columns_to_convert].astype(float) / 100
@@ -594,7 +614,6 @@ def format_data(doc: dict):
         return formated_data
 
 
-
 def main():
 
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
@@ -608,8 +627,12 @@ def main():
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         parsed_documents = list(executor.map(parse_data, documents))
 
+    del documents
+
     with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
         formated_documents = list(executor.map(format_data, parsed_documents))
+
+    del parsed_documents
 
     write_to_buffer(formated_documents)
 
@@ -627,5 +650,5 @@ if __name__ == "__main__":
     ocr_check()
     main()
 
-    print("Arquivos\nTempo de execução:", time.time() - start)
+    print("Arquivos processados!\nTempo de execução:", round(time.perf_counter() - start), 2)
     input("Pressione qualquer tecla para sair...")
